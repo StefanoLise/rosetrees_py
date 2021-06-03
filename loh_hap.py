@@ -2,9 +2,10 @@
 
 import re, gzip, os, subprocess
 
-pat_id='TR081'
-bl_sample=f'{pat_id}_BL.8x'
-sample_test=['BL.8x','PD1','PD2']
+pat_id='TR019'
+cov_gl=4                          # This determine if the haplotype is from low pass or high pass
+bl_sample=f'{pat_id}_BL.4x'
+sample_test=['PD1','PD2']
 array='HRC'
 phasingMethod='SHAPEIT4'
 readCountMethodBL='bcftools'   # could be either platypus or bcftools
@@ -15,7 +16,7 @@ if binType == 'by_snp':
     n_snp_bin=1000
     n_snp_min=750
     max_interval_size=1500000
-    gl_stdev=0.016
+    gl_stdev=0.012
 elif  binType == 'by_bp':
     pass
 else:
@@ -77,9 +78,10 @@ def read_regions_and_baf(bl_sample):
 #        loh_regions['8:1-40000000']=0.465
         loh_regions['13:49000000-90500000']=0.42
     elif bl_sample.startswith('TR019_BL'):
-        loh_regions['6:84000000-122000000']=0.465
-        loh_regions['8:8000000-43000000']=0.465
-        loh_regions['11:98000000-130000000']=0.435
+#        loh_regions['1:210000000-240000000']=0.43
+#        loh_regions['6:84000000-122000000']=0.465
+#        loh_regions['8:8000000-43000000']=0.465
+        loh_regions['11:98000000-130000000']=0.434
     else: 
         exit(f'Can not recognize sample {bl_sample}')
 
@@ -112,6 +114,9 @@ def read_allele_freq(chrom):
 def read_phased_hap(chrom):
     phased_hap_file=f'/data/scratch/DMP/UCEC/UROTRBIO/slise/ROSETREES/{pat_id}/{phasingMethod}/' \
                      f'{pat_id}.HRC.UKB.Output.vcf.gz';
+    if cov_gl:
+        phased_hap_file=f'/data/scratch/DMP/UCEC/UROTRBIO/slise/ROSETREES/{pat_id}/{phasingMethod}/' \
+                         f'{pat_id}.{cov_gl}x.HRC.UKB.Output.vcf.gz';
     if not os.path.isfile(phased_hap_file): exit(f'File not found: {phased_hap_file}')
     phased_hap=[]
     command = f"bcftools view -H -v snps -m2 -M2 {phased_hap_file} -r {chrom}"
@@ -193,6 +198,9 @@ def read_count(sample_id,chrom):
     if not os.path.isfile(vcf_file): exit(f'File not found: {vcf_file}')
     phased_hap_file=f'/data/scratch/DMP/UCEC/UROTRBIO/slise/ROSETREES/{pat_id}/{phasingMethod}/' \
                      f'{pat_id}.HRC.UKB.Output.vcf.gz';
+    if cov_gl:
+        phased_hap_file=f'/data/scratch/DMP/UCEC/UROTRBIO/slise/ROSETREES/{pat_id}/{phasingMethod}/' \
+                         f'{pat_id}.{cov_gl}x.HRC.UKB.Output.vcf.gz';
     if not os.path.isfile(phased_hap_file): exit(f'File not found: {phased_hap_file}')
     allele_count=[]
     if readCountMethodBL == 'platypus':
@@ -240,9 +248,9 @@ def read_count(sample_id,chrom):
 #####################################################################
 
 def sanity_checks():
-    if (len(phased_hap) != len(snp_count)):
+    if (len(phased_hap) != len(allele_count_bl)):
         print (f'The length of phased_hap is:',len(phased_hap))
-        print (f'The length of allele_count is:',len(allel_count_bl))
+        print (f'The length of allele_count is:',len(allele_count_bl))
         exit("The arrays 'phased_hap' and 'allele_count' shouldn't have different lengths\n")
 
 #####################################################################
@@ -262,6 +270,8 @@ def calculate_bin_baf(chrom_bins):
     baf_region=loh_regions[region]
     baf_error=3*gl_stdev
     baf_th=baf_region+baf_error
+    if baf_th > 0.5-gl_stdev: baf_th=0.5-gl_stdev
+    print(baf_th)
     chrom_bins_copy=chrom_bins.copy()
     for i_bin in range(len(chrom_bins_copy)):
         (i_start,i_end)=chrom_bins_copy[i_bin]
@@ -422,6 +432,7 @@ for region in loh_regions:
     phased_hap=read_phased_hap(chrom)
     chrom_bins=split_chromosome_into_bins(chrom)
     allele_count_bl=read_count(bl_sample,chrom)
+    sanity_checks()
     calculate_bin_baf(chrom_bins)
     hap_building(region)
     for s_t in sample_test:
