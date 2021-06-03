@@ -8,9 +8,9 @@ patID='V5322'
 target_cov=60
 target_tc=0.50
 cov_t=37.9                  # coverage of the original tumour bam
-cov_n=25.1                  # coverage of the original GL bam 
+cov_n=25.1                  # coverage of the original GL bam
 tc=0.70                     # tumour content of the original tumour bam
-k_2=1.104                   # fraction of reads (N_READS_GL/N_READS_BL) in diploid regions in both samples 
+k_2=1.104                   # fraction of reads (N_READS_GL/N_READS_BL) in diploid regions in both samples
 target_tc_f=int(100*target_tc)
 target_tc_f=f'{target_tc_f:02d}'
 
@@ -36,7 +36,7 @@ f_n=f'{f_n:05d}'
 
 print(f'Sample {patID}_BL.{target_cov}x.TC{target_tc_f}')
 print(f'Target coverage: {target_cov}x')
-print(f'Target tumor content: {target_tc}')        
+print(f'Target tumor content: {target_tc}')
 print(f'Fraction of reads kept in GL: 0.{f_n}')
 print(f'Fraction of reads kept in BL: 0.{f_t}')
 iseed=random.randint(1,1000000);
@@ -53,5 +53,3 @@ os.system(f'samtools index {n_bam_tmp}')
 
 os.system(f'samtools merge -f {out_bam}  {n_bam_tmp} {t_bam_tmp}')
 os.system(f'samtools index {out_bam}')
-
-
