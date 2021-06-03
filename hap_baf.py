@@ -2,12 +2,12 @@
 
 import re, gzip, os, subprocess, statistics, sys
 
-#patID='TR064'                   # These is the patient ID  
+#patID='TR064'                   # These is the patient ID
 patID=str(sys.argv[1])
-covGL=4                          # This determine if the haplotype is from low pass or high pass 
+covGL=4                          # This determine if the haplotype is from low pass or high pass
 covSample=None
 tc=None
-samples=('GL.4x',)               # These are the samples for which we will calculate the HAP BAF   
+samples=('BL.8x','PD1','PD2')               # These are the samples for which we will calculate the HAP BAF
 array='HRC'
 phasingMethod='SHAPEIT4'
 readCountMethod='bcftools'       # could be either platypus or bcftools
@@ -111,7 +111,7 @@ def read_phased_hap(chrom):
         gt=sample
         if ((len(ref) > 1) or (len(alt) >1)): continue
         if not re.search('^[ACGT]$',ref) and re.search('^[ACGT]$',alt): continue
-        if ((gt == '0|1') or (gt == '1|0')): 
+        if ((gt == '0|1') or (gt == '1|0')):
             phased_hap.append([pos,gt])
     return phased_hap
 
@@ -153,7 +153,7 @@ def read_count(sample_id,chrom):
                          f'{patID}.{covGL}x.HRC.UKB.Output.vcf.gz';
     if not os.path.isfile(phased_hap_file): exit(f'File not found: {phased_hap_file}')
     snp_count=[]
-    if readCountMethod == 'platypus': 
+    if readCountMethod == 'platypus':
         command = f'bcftools annotate -a {vcf_file} {phased_hap_file} -c FORMAT/NR,FORMAT/NV -r {chrom} | ' \
                    f'bcftools view -g het -H'
     elif readCountMethod == 'bcftools':
@@ -180,14 +180,14 @@ def read_count(sample_id,chrom):
                 exit(f'Something went wrong with the annotation of {sample_id} at {chrom}:pos')
             n_ref=int(nr)-int(nv)
             n_alt=int(nv)
-        elif readCountMethod == 'bcftools': 
+        elif readCountMethod == 'bcftools':
             gt=format_values
             (refF,refR,altF,altR)=(0,0,0,0)
             dp4=re.search("^DP4=(\d+),(\d+),(\d+),(\d+)$",info)
             if dp4:
                 (refF,refR,altF,altR)=map(int,dp4.group(1,2,3,4))
             n_ref=refF+refR
-            n_alt=altF+altR        
+            n_alt=altF+altR
         if not ((gt == '0|1') or (gt == '1|0')): continue
         if (gt == '0|1'):
             snp_count.append([pos,gt,n_ref,n_alt])
@@ -275,7 +275,7 @@ def output_file(sample_id,results):
 for s_t in samples:
     sample_id=f'{patID}_{s_t}'
     if covSample :
-        sample_id = sample_id + f'.{covSample}x' 
+        sample_id = sample_id + f'.{covSample}x'
     if tc :
         sample_id = sample_id + f'.TC{tc}'
     print(sample_id,f"{n_snp_bin=}",f"{n_snp_min=}")
@@ -289,4 +289,3 @@ for s_t in samples:
         sanity_checks()
         results.extend(calculate_hap_baf(chrom))
     output_file(sample_id,results)
-   

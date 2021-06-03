@@ -1,38 +1,61 @@
 #!/usr/bin/env python3
 
-import re, gzip, os, subprocess
+import re, gzip, os, subprocess, sys, random, statistics
 
 pat_id='TR019'
-cov_gl=4                          # This determine if the haplotype is from low pass or high pass
-bl_sample=f'{pat_id}_BL.8x'
-sample_test=['BL.8x','PD1','PD2']
+cov_gl=4                        # This determine if the haplotype is from low pass or high pass
+bl_sample=f'{pat_id}_BL.4x'
+pd_sample=f'{pat_id}_PD_M'       # Double check bam file
+pd_cov=8.5                       # This is the original coverage of the PD sample
+loh_region='11:98000000-130000000'
+n_rep=100
+target_cov=4                    # Target coverage of the subsampled PD sample
 array='HRC'
 phasing_method='SHAPEIT4'
 read_count_method_bl='bcftools'   # could be either platypus or bcftools
-read_count_method_test='bcftools'   # could be either platypus or bcftools
+read_count_method_pd='bcftools'   # could be either platypus or bcftools
 af_ref_panel_th=0.005
 bin_type='by_snp'        # could be 'by_snp' or 'by_bp'
 if bin_type == 'by_snp':
     n_snp_bin=1000
     n_snp_min=750
     max_interval_size=1500000
-    gl_stdev=0.02
+#    gl_stdev=0.016
     if n_snp_bin >= 1000:
         int_size_f=f"{n_snp_bin//1000:d}Ksnp"
     else:
         int_size_f=f"{n_snp_bin}snp"
-elif bin_type == 'by_bp':
+elif  bin_type == 'by_bp':
     pass
 else:
     exit(f"Bin type '{bin_type}' not defined: it's either 'by_snp' or 'by_bp'")
 
-loh_regions=dict()
 allele_freq=dict()
 phased_hap=[]
 chrom_bins=[]
+allele_count_bl=[]
 
+##################################################################################
 
-################################################################
+def main():
+    global allele_freq, phased_hap, chrom_bins, allele_count_bl
+    if n_rep:
+        results=[]
+        (chrom,region_start,region_end)=parse_region(loh_region)
+        allele_freq=read_allele_freq(chrom)
+        phased_hap=read_phased_hap(chrom)
+        chrom_bins=split_chromosome_into_bins(chrom)
+        allele_count_bl=read_count_bl(bl_sample,chrom)
+        sanity_checks()
+        calculate_bin_baf(chrom_bins)
+        hap_building(loh_region)
+        for i in range (1,n_rep+1):
+            read_count_pd(pd_sample,loh_region)
+            results.append(tc_est(pd_sample,loh_region))
+        write_results(results)
+    summary_stats()
+
+################################################
 
 def run_command(command):
     p = subprocess.Popen(command,
@@ -44,52 +67,6 @@ def run_command(command):
 
 ##################################################
 
-def read_regions_and_baf(bl_sample):
-    if bl_sample.startswith('PT23_BL'):
-        loh_regions['5:80000000-180000000']=0.14
-        loh_regions['6:63000000-166000000']=0.21
-        loh_regions['8:1-43000000']=0.21
-        loh_regions['13:20000000-77000000']=0.21
-        loh_regions['16:49000000-90000000']=0.21
-    elif bl_sample.startswith('PT23_PD'):
-        loh_regions['5:80000000-180000000']=0.19
-        loh_regions['6:63000000-166000000']=0.27
-        loh_regions['8:1-43000000']=0.27
-        loh_regions['13:20000000-77000000']=0.27
-        loh_regions['16:49000000-90000000']=0.27
-    elif bl_sample.startswith('PT36_BL'):
-        pass
-    elif bl_sample.startswith('PT36_PD'):
-        pass
-    elif bl_sample.startswith('PT78_BL'):
-        pass
-    elif bl_sample.startswith('PT78_PD'):
-        pass
-    elif bl_sample.startswith('V5322_BL'):
-        loh_regions['1:69000000-89000000']=0.06
-        loh_regions['4:80000000-175000000']=0.34
-        loh_regions['6:1-29000000']=0.34
-        loh_regions['8:1-43000000']=0.06
-        loh_regions['9:1-35000000']=0.06
-        loh_regions['13:41000000-70000000']=0.11
-        loh_regions['16:53500000-90000000']=0.27
-        loh_regions['18:35500000-78000000']=0.06
-    elif bl_sample.startswith('TR081_BL'):
-        loh_regions['8:1-43000000']=0.15
-        loh_regions['12:1-35000000']=0.11
-        loh_regions['17:1-22000000']=0.15
-    elif bl_sample.startswith('TR064_BL'):
-#        loh_regions['8:1-40000000']=0.465
-        loh_regions['13:49000000-90500000']=0.42
-    elif bl_sample.startswith('TR019_BL'):
-        loh_regions['6:84000000-122000000']=0.465
-        loh_regions['8:8000000-43000000']=0.465
-        loh_regions['11:98000000-130000000']=0.435
-    else:
-        exit(f'Can not recognize sample {bl_sample}')
-
-##################################################
-
 def parse_region(region):
     region_obj=re.search("^(\d+):(\d+)-(\d+)",region)
     if not region_obj: exit(f"Not an acceptable region: {region}")
@@ -97,10 +74,12 @@ def parse_region(region):
     return chrom,region_start,region_end
 
 ##################################################
+
 def read_allele_freq(chrom):
-    vcfFile='../DATA/SNPs/HRC/snps.vcf.gz'
-    allele_freq={}
-    command = f"bcftools query -f'%POS\t%INFO/AF\n' {vcfFile} -r {chrom}"
+    vcf_file='../DATA/SNPs/HRC/snps.vcf.gz'
+    if not os.path.isfile(vcf_file): exit(f'File not found: {vcf_file}')
+    af_dict={}
+    command = f"bcftools query -f'%POS\t%INFO/AF\n' {vcf_file} -r {chrom}"
     for line in run_command(command):
         if line == '':  break
         line = line.rstrip()
@@ -109,17 +88,17 @@ def read_allele_freq(chrom):
         (pos,af)=fields[:]
         pos=int(pos)
         af=float(af)
-        allele_freq[pos]=af
-    return allele_freq
+        af_dict[pos]=af
+    return af_dict
 
-################################################################################
+###########################################################
 
 def read_phased_hap(chrom):
     phased_hap_file=f'../{pat_id}/{phasing_method}/{pat_id}.HRC.UKB.Output.vcf.gz';
     if cov_gl:
         phased_hap_file=f'../{pat_id}/{phasing_method}/{pat_id}.{cov_gl}x.HRC.UKB.Output.vcf.gz';
     if not os.path.isfile(phased_hap_file): exit(f'File not found: {phased_hap_file}')
-    phased_hap=[]
+    phased_hap_tmp=[]
     command = f"bcftools view -H -v snps -m2 -M2 {phased_hap_file} -r {chrom}"
     for line in run_command(command):
         if line == '':  break
@@ -135,8 +114,8 @@ def read_phased_hap(chrom):
         if ((len(ref) > 1) or (len(alt) >1)): continue
         if not re.search('^[ACGT]$',ref) and re.search('^[ACGT]$',alt): continue
         if ((gt == '0|1') or (gt == '1|0')):
-            phased_hap.append([pos,ref,alt,gt])
-    return phased_hap
+            phased_hap_tmp.append([pos,ref,alt,gt])
+    return phased_hap_tmp
 
 #################################################
 
@@ -192,9 +171,9 @@ def split_chromosome_into_bins(chrom):
         i_start = i_end + 1
     return chrom_bins
 
-#################################################################
+#################################################
 
-def read_count(sample_id,chrom):
+def read_count_bl(sample_id,chrom):
     vcf_file=f'../{pat_id}/VCF/{sample_id}.{array}.vcf.gz'
     if not os.path.isfile(vcf_file): exit(f'File not found: {vcf_file}')
     phased_hap_file=f'../{pat_id}/{phasing_method}/{pat_id}.HRC.UKB.Output.vcf.gz';
@@ -231,12 +210,12 @@ def read_count(sample_id,chrom):
             n_alt=int(nv)
         elif read_count_method_bl == 'bcftools':
             gt=format_values
-            (refF,refR,altF,altR)=(0,0,0,0)
+            (ref_f,ref_r,alt_f,alt_r)=(0,0,0,0)
             dp4=re.search("^DP4=(\d+),(\d+),(\d+),(\d+)$",info)
             if dp4:
-                (refF,refR,altF,altR)=map(int,dp4.group(1,2,3,4))
-            n_ref=refF+refR
-            n_alt=altF+altR
+                (ref_f,ref_r,alt_f,alt_r)=map(int,dp4.group(1,2,3,4))
+            n_ref=ref_f+ref_r
+            n_alt=alt_f+alt_r
         if not ((gt == '0|1') or (gt == '1|0')): continue
         if (gt == '0|1'):
             allele_count.append([pos,gt,n_ref,n_alt])
@@ -244,8 +223,7 @@ def read_count(sample_id,chrom):
             allele_count.append([pos,gt,n_alt,n_ref])
     return allele_count
 
-#####################################################################
-
+####################################################################
 def sanity_checks():
     if (len(phased_hap) != len(allele_count_bl)):
         print (f'The length of phased_hap is:',len(phased_hap))
@@ -253,6 +231,23 @@ def sanity_checks():
         exit("The arrays 'phased_hap' and 'allele_count' shouldn't have different lengths\n")
 
 #####################################################################
+
+def calculate_bin_baf(chrom_bins):
+    d_baf_th=0.06                             # Set this according to bin size
+    chrom_bins_copy=chrom_bins.copy()
+    for i_bin in range(len(chrom_bins_copy)):
+        (i_start,i_end)=chrom_bins_copy[i_bin]
+        n_l=n_r=n_snp=0
+        for i in (range(i_start,i_end+1)):
+            n_snp +=1
+            n_l += allele_count_bl[i][2]
+            n_r += allele_count_bl[i][3]
+        d_baf=(n_r-n_l)/(n_r+n_l)
+        flag  ='+' if d_baf > d_baf_th else '-' if d_baf < -d_baf_th else '?'
+        if n_snp < n_snp_min: flag='?'
+        chrom_bins[i_bin].extend([n_l,n_r,flag])
+
+#################################################################
 
 def switch_gt(gt):
     if (gt == '0|1'):
@@ -265,33 +260,22 @@ def switch_gt(gt):
 
 ####################################################################
 
-def calculate_bin_baf(chrom_bins):
-    baf_region=loh_regions[region]
-    baf_error=3*gl_stdev
-    baf_th=baf_region+baf_error
-    if baf_th > 0.5-gl_stdev: baf_th=0.5-gl_stdev
-    print(baf_th)
-    chrom_bins_copy=chrom_bins.copy()
-    for i_bin in range(len(chrom_bins_copy)):
-        (i_start,i_end)=chrom_bins_copy[i_bin]
-        n_l=n_r=n_snp=0
-        for i in (range(i_start,i_end+1)):
-            n_snp +=1
-            n_l += allele_count_bl[i][2]
-            n_r += allele_count_bl[i][3]
-        af_l=n_l/(n_l+n_r)
-        flag  ='+' if af_l <= baf_th else '-' if af_l >= (1-baf_th) else '?'
-        if n_snp < n_snp_min: flag='?'
-        chrom_bins[i_bin].extend([n_l,n_r,flag])
-
-#################################################################
-
 def hap_building(region):
     (chrom,region_start,region_end)=parse_region(region)
     out_dir=f'../{pat_id}/HAP_BUILDING'
-    out_vcf_file=f'{out_dir}/{bl_sample}.chr{region}.{int_size_f}.vcf'
+    if bin_type == 'by_snp':
+        if n_snp_bin >= 1000:
+            int_size_f=f"{n_snp_bin//1000:d}Ksnp"
+        else:
+            int_size_f=f"{n_snp_bin}snp"
+    elif  bin_type == 'by_bp':
+        pass
+    else:
+        exit('Problems')
+
+    out_file=f'{out_dir}/{bl_sample}.chr{region}.{int_size_f}'
     try:
-        fout_vcf=open(out_vcf_file,'w')
+        fout_vcf=open(f"{out_file}.vcf",'w')
     except:
         exit(f"Can not open: {out_vcf_file}")
     fout_vcf.write('##fileformat=VCFv4.1\n')
@@ -316,8 +300,11 @@ def hap_building(region):
             if flag == '-': gt=switch_gt(gt)
             fout_vcf.write('\t'.join(str(p) for p in ([chrom,pos,'.',ref,alt,'.','PASS','.','GT',gt]))+'\n')
     fout_vcf.close()
-    os.system(f'bgzip -f {out_vcf_file}')
-    os.system(f'tabix -fp vcf {out_vcf_file}.gz')
+    os.system(f'bgzip -f {out_file}.vcf')
+    os.system(f'tabix -fp vcf {out_file}.vcf.gz')
+    os.system(f"bcftools query -f'%CHROM\t%POS\t%REF,%ALT\n' {out_file}.vcf.gz | bgzip -c > {out_file}.tsv.gz")
+    os.system(f"tabix -s1 -b2 -e2 {out_file}.tsv.gz")
+
     print(region,n_snp_region,n_snp_hap)
 
     out_baf_file=f'{out_dir}/{bl_sample}.chr{region}.{int_size_f}.baf.tsv'
@@ -339,18 +326,38 @@ def hap_building(region):
 
 #################################################################
 
-def tc_est(region,sample_id):
+def read_count_pd(sample_id,region):
+    bam_dir=f'../{pat_id}/BAM'
+    bam=f'{bam_dir}/{sample_id}.chr11.bam'
+    bam_tmp=f'{bam_dir}/TMP/{sample_id}.{target_cov}x.bam'
+    f_r=int(100000*target_cov/pd_cov)
+    f_r=f'{f_r:05d}'
+    iseed=random.randint(1,1000000);
+    s = f"{iseed}.{f_r}";
+    os.system(f'samtools view -bh {bam} -s {s} -o {bam_tmp} {region}')
+    os.system(f'samtools index {bam_tmp}')
+
+    out_file=f'../{pat_id}/VCF/TMP/{sample_id}.{target_cov}x.vcf.gz'
+    ref_file='../../DATA/GENOMES/HS37D5/hs37d5.fa'
+    sites=f'../{pat_id}/HAP_BUILDING/{bl_sample}.chr{region}.{int_size_f}'
+    os.system(f"bcftools mpileup {bam_tmp} --ignore-RG -f {ref_file} -I -E -T {sites}.vcf.gz -d 10000 -Ou 2> /dev/null|" \
+              + f" bcftools call -Aim -C alleles -T {sites}.tsv.gz -Oz -o {out_file} 2> /dev/null")
+    os.system(f"tabix -fp vcf {out_file}");
+
+#################################################################
+
+def tc_est(sample_id,region):
     (chrom,region_start,region_end)=parse_region(region)
+
     hap_file=f'../{pat_id}/HAP_BUILDING/{bl_sample}.chr{region}.{int_size_f}.vcf.gz'
-    vcf_file=f'../{pat_id}/VCF/{sample_id}.{array}.vcf.gz'
+    vcf_file=f'../{pat_id}/VCF/TMP/{sample_id}.{target_cov}x.vcf.gz'
     if not os.path.isfile(hap_file): exit(f'File not found: {hap_file}')
     if not os.path.isfile(vcf_file): exit(f'File not found: {vcf_file}')
-
     n_l=n_r=n_snp=0;
-    if read_count_method_test == 'platypus':
+    if read_count_method_pd == 'platypus':
         command = f'bcftools annotate -a {vcf_file} {hap_file} -c FORMAT/NR,FORMAT/NV -r {region} |' \
                    f'bcftools view -g het -H'
-    elif read_count_method_test == 'bcftools':
+    elif read_count_method_pd == 'bcftools':
         command = f'bcftools annotate -a {vcf_file} {hap_file} -x INFO,^FORMAT/GT -c INFO/DP4 -r {chrom} | ' \
                    f'bcftools view -g het -H'
     for line in run_command(command):
@@ -364,7 +371,7 @@ def tc_est(region,sample_id):
         if not (re.search('^[ACGT]$',ref) and re.search('^[ACGT]$',alt)):
             print(line)
             continue
-        if read_count_method_test == 'platypus':
+        if read_count_method_pd == 'platypus':
             if (len(format_fields.split(':')) == 3):
                 (gt,nr,nv)=format_values.split(':')
                 if not nr.isnumeric(): nr=0
@@ -375,7 +382,7 @@ def tc_est(region,sample_id):
                 exit(f'Something went wrong with the annotation of {sample_id} at {chrom}:{pos}')
             n_ref=int(nr)-int(nv)
             n_alt=int(nv)
-        elif read_count_method_test == 'bcftools':
+        elif read_count_method_pd == 'bcftools':
             gt=format_values
             (ref_f,ref_r,alt_f,alt_r)=(0,0,0,0)
             dp4=re.search("^DP4=(\d+),(\d+),(\d+),(\d+)$",info)
@@ -391,28 +398,59 @@ def tc_est(region,sample_id):
         elif (gt == '1|0'):
             n_l += n_alt
             n_r += n_ref
-    if (n_l+n_r):
-        af_l=f"{n_l/(n_l+n_r):.4f}"
-        af_r=f"{n_r/(n_l+n_r):.4f}"
-        daf=f"{(n_r-n_l)/(n_l+n_r):.4f}"
+    n_tot=n_l+n_r
+    if (n_tot):
+        af_l=f"{n_l/(n_tot):.4f}"
+        af_r=f"{n_r/(n_tot):.4f}"
+        daf=f"{(n_r-n_l)/(n_tot):.4f}"
+        cov=f"{n_tot/(n_snp):.4f}"
     else:
         af_l='NA'
         af_r='NA'
         daf='NA'
-    print(f'{sample_id}',region,n_snp,n_l,n_r,n_l+n_r,af_l,af_r,daf,sep='\t')
+        cov='NA'
+    return [n_snp,n_l,n_r,n_tot,cov,af_l,af_r,daf]
+#    print(f'{sample_id}',region,n_snp,n_l,n_r,n_l+n_r,af_l,af_r,daf,sep='\t')
+#################################################################
 
-#########################################################################################################
+def write_results(results):
+    out_file=f"../{pat_id}/TC_EST/{pd_sample}.{target_cov}x.chr{loh_region}.tsv"
+    try:
+        with open(out_file,"w") as fout:
+            print('#n_snp','n_l','n_r','n_tot','cov','af_l','af_r','daf',sep="\t",file=fout)
+            for out in results:
+                (n_snp,n_l,n_r,n_tot,cov,af_l,af_r,daf)=out
+                print(*out,sep="\t",file=fout)
+    except:
+        exit(f"Can not open {out_file}")
 
-read_regions_and_baf(bl_sample)
-for region in loh_regions:
-    (chrom,region_start,region_end)=parse_region(region)
-    allele_freq=read_allele_freq(chrom)
-    phased_hap=read_phased_hap(chrom)
-    chrom_bins=split_chromosome_into_bins(chrom)
-    allele_count_bl=read_count(bl_sample,chrom)
-    sanity_checks()
-    calculate_bin_baf(chrom_bins)
-    hap_building(region)
-    for s_t in sample_test:
-        sample_id=f'{pat_id}_{s_t}'
-        tc_est(region,sample_id)
+################################################################
+
+def summary_stats():
+    in_file=f"../{pat_id}/TC_EST/{pd_sample}.{target_cov}x.chr{loh_region}.tsv"
+    daf_list=[]
+    try:
+        with open(in_file, "r") as f_in:
+            for line in f_in:
+                if line == '':  break
+                line = line.rstrip()
+                if line.startswith('#'): continue
+                fields = line.split()
+                n_snp,n_l,n_r,n_tot,cov,af_l,af_r,daf=fields[:]
+                daf_list.append(float(daf))
+    except:
+        exit(f"Can not open: {in_file}")
+    daf_mean=statistics.mean(daf_list)
+    daf_stdev=statistics.stdev(daf_list)
+    daf_max=max(daf_list)
+    daf_min=min(daf_list)
+    n=len(daf_list)
+    print(daf_mean,daf_stdev,daf_max,daf_min,n,sep="\t")
+
+
+
+
+#################################################################
+# Program entry point -> call main()
+if __name__ == '__main__':
+    main()

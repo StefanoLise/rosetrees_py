@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 import sys
 
-print('Number of arguments:', len(sys.argv), 'arguments.')
-print('Argument List:', str(sys.argv[1]))
+def main():
+    pass
 
+def fname(arg):
+    pass
 
+# Program entry point -> call main()
+if __name__ == '__main__':
+    main()
